@@ -12,7 +12,7 @@ import plotly.graph_objects as go
 # ==========================================
 # CONFIGURACIÓN PAGINA
 # ==========================================
-st.set_page_config(page_title="Topo Dashboard V27", layout="wide", page_icon=None)
+st.set_page_config(page_title="Topo Dashboard V27", layout="wide", page_icon="Logo_TS.ico")
 
 # ==========================================
 # GESTIÓN DE BASES DE DATOS (JSON)
