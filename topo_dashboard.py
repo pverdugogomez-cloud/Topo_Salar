@@ -335,9 +335,37 @@ with st.sidebar:
             except Exception as e:
                 st.error(str(e))
         
-        if st.checkbox("Ver Editor BD completa", key="chk_db_view"):
-            db_view = pd.DataFrame(list(st.session_state.db_pozas.items()), columns=['Poza', 'Cover'])
-            st.data_editor(db_view)
+        # Editor de Base de Datos
+        if st.checkbox("Gestionar Base de Datos Manualmente", key="chk_db_edit"):
+            st.info("Puede agregar, editar o eliminar filas. Pulse 'Guardar' al finalizar.")
+            
+            # Convert Dict to DataFrame for Editor
+            current_data = [{"Poza": k, "Cover": v} for k, v in st.session_state.db_pozas.items()]
+            df_db_edit = pd.DataFrame(current_data)
+            
+            edited_df = st.data_editor(
+                df_db_edit,
+                num_rows="dynamic",
+                column_config={
+                    "Poza": st.column_config.TextColumn("Poza ID", required=True),
+                    "Cover": st.column_config.NumberColumn("Cover (cm)", required=True, min_value=0.0)
+                },
+                use_container_width=True,
+                key="db_editor_widget"
+            )
+            
+            if st.button("💾 Guardar Cambios en BD", key="btn_save_db"):
+                # Reconstruct Dictionary
+                new_db = {}
+                for idx, row in edited_df.iterrows():
+                    p_id = str(row['Poza']).strip().upper()
+                    if p_id and p_id != "NAN" and p_id != "NONE":
+                        new_db[p_id] = float(row['Cover'])
+                
+                st.session_state.db_pozas = new_db
+                save_db(new_db)
+                st.success(f"Base de datos actualizada: {len(new_db)} registros.")
+                st.rerun()
 
         st.divider()
         
