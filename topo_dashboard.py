@@ -206,7 +206,13 @@ def generate_excel_report(global_res_dict, col_map=None):
 # ==========================================
 # MAIN APP INIT
 # ==========================================
-st.title("Dashboard Topo V27")
+# Title with Logo
+col_h1, col_h2 = st.columns([1, 5])
+with col_h1:
+    if os.path.exists("logo.png"):
+        st.image("logo.png", use_container_width=True)
+with col_h2:
+    st.title("Dashboard Topo V27")
 
 # Initial Vars
 df = None
