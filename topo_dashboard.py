@@ -207,10 +207,11 @@ def generate_excel_report(global_res_dict, col_map=None):
 # MAIN APP INIT
 # ==========================================
 # Title with Logo
-col_h1, col_h2 = st.columns([1, 5])
+# Title with Logo
+col_h1, col_h2 = st.columns([0.5, 4])
 with col_h1:
-    if os.path.exists("logo.png"):
-        st.image("logo.png", use_container_width=True)
+    if os.path.exists("Logo_TS.ico"):
+        st.image("Logo_TS.ico", width=60)
 with col_h2:
     st.title("Dashboard Topo V27")
 
