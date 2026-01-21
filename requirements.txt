@@ -5,3 +5,4 @@ plotly
 xlsxwriter
 openpyxl
 kaleido
+matplotlib
