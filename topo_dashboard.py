@@ -123,32 +123,39 @@ def generate_excel_report(global_res_dict, col_map=None):
                 kpi_val = (area_mala / data['atot']) * 100 if data['atot'] > 0 else 0
                 ws2.write(curr+7, 0, f"KPI Incidencia (Area Defectuosa / Total): {kpi_val:.2f}%", f_tit)
 
-                # Insert Map Image NEXT to table (approx col 13?)
-                # We need to generate it here
-                map_inserted = False
+                # INSERT MAPS (Heatmap Only)
+                import matplotlib.pyplot as plt
+                
+                # Heatmap (Bottom) - "Abajo"
+                row_heat = curr + 0 # Now directly below tables
                 try:
-                    fig_map = topo_logic.generar_mapa_interactivo(
+                    ws2.write(row_heat, 14, "Mapa de Calor", f_tit)
+                    fig_map = topo_logic.generar_mapa_matplotlib(
                          data['df'], data['zonas'], 
-                         col_n=col_mapping['N'], col_e=col_mapping['E'],
-                         titulo=f"Mapa {poza_id} - Turno {t}",
-                         step=poza_data['Config']['Tol']
+                         col_n=col_map['N'], col_e=col_map['E'],
+                         titulo=f"Mapa Calor {poza_id}-{t}",
+                         tol=poza_data['Config']['Tol']
                     )
                     if fig_map:
-                        # Ensure kaleido is present or handle
-                        img_data = io.BytesIO(fig_map.to_image(format="png", width=600, height=500, scale=1.5))
-                        # Insert at 'curr' row, col 14 (N)
-                        ws2.insert_image(curr, 14, 'map.png', {'image_data': img_data, 'x_scale': 0.8, 'y_scale': 0.8})
+                        img_heat = io.BytesIO()
+                        fig_map.savefig(img_heat, format='png', bbox_inches='tight', dpi=100)
+                        img_heat.seek(0)
+                        ws2.insert_image(row_heat+1, 14, 'map_heat.png', {'image_data': img_heat, 'x_scale': 0.6, 'y_scale': 0.6})
+                        plt.close(fig_map)
                         map_inserted = True
                 except Exception as e:
-                    print(f"Map gen failed: {e}")
-                    ws2.write(curr, 14, "No se pudo generar imagen (Kaleido missing?)")
-
+                    ws2.write(row_heat+1, 14, f"Error Heatmap: {e}")
+                
                 curr += 9
+
                 
                 # Table of Zones
                 if not data['zonas'].empty:
-                    ws2.write(curr, 0, f"Detalle Zonas Turno {t}", f_hy)
-                    # Headers centered
+                    # Merge Title across all columns
+                    cols_count = len(data['zonas'].columns)
+                    ws2.merge_range(curr, 0, curr, cols_count - 1, f"Detalle Zonas Turno {t}", f_hy)
+                    
+                    # Headers
                     ws2.write_row(curr+1, 0, data['zonas'].columns, f_hy)
                     for i, row in data['zonas'].iterrows():
                          ws2.write_row(curr+2+i, 0, row.values, f_center)
@@ -577,7 +584,14 @@ if apply_filters and df is not None:
                         
                         # TABLE (Hide Color column)
                         df_show = data['tbl'].drop(columns=['Color'], errors='ignore')
-                        st.dataframe(df_show.style.format({'Porcentaje': "{:.1f}%"}), use_container_width=True)
+                        # Explicit integer formatting for coordinates and area
+                        format_dict = {
+                            'Porcentaje': "{:.1f}%",
+                            'Area_Efectiva_m2': "{:.0f}",
+                            'N_Min': "{:.0f}", 'N_Max': "{:.0f}",
+                            'E_Min': "{:.0f}", 'E_Max': "{:.0f}"
+                        }
+                        st.dataframe(df_show.style.format(format_dict, na_rep=""), use_container_width=True)
                         
                         # CHART (Uniform Color)
                         fig = go.Figure()
@@ -591,15 +605,53 @@ if apply_filters and df is not None:
                         st.plotly_chart(fig, use_container_width=True)
 
             with t_map:
+                # 1. Combined Satellite Map (Full Width) - HIDDEN TEMPORARILY (Coordinate Shift)
+                # st.subheader("Vista Satelital Consolidada")
+                
+                # Combine all turns data
+                # dfs_to_combine = []
+                # for t in turns_present:
+                #     if not poza_data[t]['df'].empty:
+                #         dtemp = poza_data[t]['df'].copy()
+                #         dtemp['Turno_Label'] = str(t)
+                #         dfs_to_combine.append(dtemp)
+                
+                # if dfs_to_combine:
+                #     df_combined = pd.concat(dfs_to_combine, ignore_index=True)
+                    
+                #     with st.spinner("Generando mapa satelital consolidado..."):
+                #         fig_sat = topo_logic.generar_mapa_satelital_interactivo(
+                #             df_combined, cn, ce,
+                #             titulo=f"Satélite {pid} - Todos los Turnos",
+                #             tol=tol_step_val
+                #         )
+                #         if isinstance(fig_sat, str):
+                #             st.error(fig_sat)
+                #         elif fig_sat:
+                #              # Tweak height for better view
+                #             fig_sat.update_layout(height=700)
+                #             st.plotly_chart(fig_sat, use_container_width=True)
+                #         else:
+                #             st.warning("No se pudo generar vista satelital.")
+                # else:
+                #     st.info("Sin datos para mapa satelital.")
+
+                st.divider()
+
+                # 2. Individual Heatmaps
                 col_maps = st.columns(len(turns_present)) if len(turns_present) > 0 else [st.container()]
                 for idx, t in enumerate(turns_present):
                      data = poza_data[t]
                      with col_maps[idx]:
-                         st.subheader(f"Mapas - Turno {t}")
+                         st.subheader(f"Mapa Calor - Turno {t}")
+                         # Removed per-turn satellite map from here
+
+                         # 2. Heatmap (Plotly)
+                         st.caption("Mapa de Calor Interactivo")
                          fig_map = topo_logic.generar_mapa_interactivo(
                              data['df'], data['zonas'], 
                              col_n=cn, col_e=ce,
-                             titulo=f"Mapa {pid} - Turno {t}",
+                             titulo=f"Mapa Calor {pid} - Turno {t}",
                              step=tol_step_val
                          )
                          st.plotly_chart(fig_map, use_container_width=True)
