@@ -3,6 +3,10 @@ import numpy as np
 import matplotlib.pyplot as plt
 import matplotlib.patches as patches
 from matplotlib.colors import ListedColormap, BoundaryNorm
+import os
+
+# Fix for Streamlit Cloud (Headless)
+plt.switch_backend('Agg')
 import traceback
 
 # ==========================================
@@ -146,8 +150,8 @@ def detectar_zonas(df, col_n, col_e, tol):
             cmin, cmax = np.min(inds[1]), np.max(inds[1])
             zonas.append({
                 'ID': i, 'Area_Efectiva_m2': area, 
-                'N_Min': n_min + rmin, 'N_Max': n_min + rmax + 1, 
-                'E_Min': e_min + cmin, 'E_Max': e_min + cmax + 1
+                'N_Min': int(n_min + rmin), 'N_Max': int(n_min + rmax + 1), 
+                'E_Min': int(e_min + cmin), 'E_Max': int(e_min + cmax + 1)
             })
     return pd.DataFrame(zonas), atot
 
@@ -182,13 +186,108 @@ def generar_texto_analisis(stats_df, zonas_df, atot, poza):
     area_mala = zonas_df['Area_Efectiva_m2'].sum() if not zonas_df.empty else 0
     
     return (f"ANÁLISIS TÉCNICO - {poza}\n\n1. SITUACIÓN GENERAL:\n"
-            f"   El rango predominante es '{pred['Rango']}', con un {pred['Porcentaje']:.1%} de la superficie.\n\n"
+            f"   El rango predominante es '{pred['Rango']}', con un {pred['Porcentaje']:.1f}% de la superficie.\n\n"
             f"2. ÁREAS DEFECTUOSAS:\n   Se detectaron {cant_zonas} zonas críticas (>{AREA_MINIMA_M2}m²). "
             f"La superficie total afectada es de {int(area_mala)} m² sobre un total de {int(atot)} m².\n\n"
             f"3. RECOMENDACIÓN:\n   Se sugiere priorizar las zonas identificadas para trabajos de renivelación.")
 
 # ==========================================
-# LÓGICA DE VISUALIZACIÓN
+# NUEVA LÓGICA: MAPAS SATELITALES (MATPLOTLIB + CONTEXTILY)
+# ==========================================
+import contextily as ctx
+try:
+    import pyproj
+except ImportError:
+    pass
+
+def generar_mapa_satelital_interactivo(df, col_n, col_e, titulo, tol):
+    """Genera un mapa INTERACTIVO (Plotly) con fondo Satelital (Esri)."""
+    try:
+        # Limpieza y Conversión Numérica
+        df[col_n] = pd.to_numeric(df[col_n], errors='coerce')
+        df[col_e] = pd.to_numeric(df[col_e], errors='coerce')
+        
+        df_clean = df.replace([np.inf, -np.inf], np.nan).dropna(subset=[col_n, col_e, 'Desv_cm'])
+        if df_clean.empty: 
+            return f"Error: Sin datos válidos. Revise columnas {col_n}/{col_e} o valores vacíos."
+        
+        # CONVERSIÓN DE COORDENADAS (UTM 19S -> WGS84 Lat/Lon)
+        # Requerido para mapas web (Plotly Mapbox)
+        try:
+            transformer = pyproj.Transformer.from_crs("EPSG:32719", "EPSG:4326", always_xy=True)
+            # Transform expects (x, y) -> returns (lon, lat)
+            lons, lats = transformer.transform(df_clean[col_e].values, df_clean[col_n].values)
+            df_clean['lon'] = lons
+            df_clean['lat'] = lats
+        except Exception as e:
+            return f"Error Proyección: {str(e)}"
+
+        # Configurar colores y rangos (igual que antes)
+        limits, labels = get_dynamic_ranges(tol)
+        
+        # Mapear colores a valores para Plotly
+        # Plotly permite array de colores o escala continua. Usaremos escala discreta manual si es posible o continua.
+        # Para simplicidad visual interactiva, una escala continua personalizada con los colores definidos:
+        
+        # Construir escala de colores para Plotly Mapbox
+        # (Truco: normalizar valores para que calcen con los cortes) - O usar simple colorbar
+        
+        fig = go.Figure()
+
+        # Añadir Puntos
+        fig.add_trace(go.Scattermapbox(
+            lat=df_clean['lat'],
+            lon=df_clean['lon'],
+            mode='markers',
+            marker=go.scattermapbox.Marker(
+                size=8, # Tamaño pixelado visible
+                color=df_clean['Desv_cm'],
+                colorscale=[
+                    [0.0, '#C00000'],    # < -3x
+                    [0.125, '#FF0000'],  # -3x a -2x
+                    [0.25, '#FFC000'],   # -2x a -1x
+                    [0.375, '#92D050'],  # -1x a 0
+                    [0.5, '#92D050'],    # 0 a 1x 
+                    [0.625, '#00B0F0'],  # 1x a 2x
+                    [0.75, '#0070C0'],   # 2x a 3x
+                    [1.0, '#002060']     # > 3x
+                ],
+                cmin=-3*tol, cmax=3*tol, # Fijar min/max para estabilidad visual
+                opacity=0.8,
+            ),
+            text=df_clean['Desv_cm'].apply(lambda x: f"Desv: {x:.1f}cm"),
+            hoverinfo='text'
+        ))
+
+        # Configurar Layout Maps (Esri Satellite)
+        fig.update_layout(
+            title=dict(text=f"Satelital Interactivo - {titulo}", y=0.98),
+            mapbox=dict(
+                style="white-bg", # Estilo base vacío para poner capas encima
+                layers=[
+                    {
+                        "below": 'traces',
+                        "sourcetype": "raster",
+                        "sourceattribution": "Esri World Imagery",
+                        "source": [
+                            "https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}"
+                        ]
+                    }
+                ],
+                center=dict(lat=df_clean['lat'].mean(), lon=df_clean['lon'].mean()),
+                zoom=16 # Zoom inicial cercano
+            ),
+            margin={"r":0,"t":40,"l":0,"b":0},
+            height=600
+        )
+        return fig
+            
+    except Exception as e:
+        traceback.print_exc()
+        return f"Error General Satélite: {str(e)}"
+
+# ==========================================
+# LÓGICA DE VISUALIZACIÓN (ANTIGUA)
 # ==========================================
 
 def generar_mapa_matplotlib(df, zonas, col_n, col_e, titulo, tol):
@@ -197,7 +296,10 @@ def generar_mapa_matplotlib(df, zonas, col_n, col_e, titulo, tol):
     Retorna (fig, ax) para ser usado en Streamlit.
     """
     try:
-        # Limpieza robusta
+        # Limpieza robusta y Coerción Numérica
+        df[col_n] = pd.to_numeric(df[col_n], errors='coerce')
+        df[col_e] = pd.to_numeric(df[col_e], errors='coerce')
+
         df_clean = df.replace([np.inf, -np.inf], np.nan).dropna(subset=[col_n, col_e, 'Desv_cm'])
         if df_clean.empty:
             raise ValueError(f"Sin datos válidos para graficar. Revisar columnas {col_n}, {col_e} o Desv_cm.")
@@ -218,9 +320,12 @@ def generar_mapa_matplotlib(df, zonas, col_n, col_e, titulo, tol):
         fig, ax = plt.subplots(figsize=(12, 10), dpi=120)
         ax.set_facecolor('#EBEBEB') # Gris claro de fondo
         
+        # Obtener rangos dinámicos
+        limits, _ = get_dynamic_ranges(tol)
+        
         # Colormap
-        cmap_custom = ListedColormap(COLORES_FINALES)
-        norm_custom = BoundaryNorm(LIMITES_FINALES, cmap_custom.N)
+        cmap_custom = ListedColormap(COLORES_FINALES_BASE)
+        norm_custom = BoundaryNorm(limits, cmap_custom.N)
 
         # Scatter Plot - Puntos de fondo más grandes para visibilidad
         sc = ax.scatter(

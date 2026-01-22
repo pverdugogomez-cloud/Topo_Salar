@@ -6,3 +6,5 @@ xlsxwriter
 openpyxl
 kaleido
 matplotlib
+contextily
+pyproj
