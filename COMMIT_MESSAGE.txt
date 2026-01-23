@@ -1,7 +1,0 @@
-Update V27: Add Per-Poza Cover Editor, Proactive Warnings, and Fix Date Parsing
-
-- Feature: Added proactive 'Missing Cover' warning at the top of the dashboard.
-- Feature: Implemented 'Per-Poza' manual cover editor in sidebar with session persistence.
-- Fix: Robust date parsing for 'Jan/Feb' formats on Spanish locales.
-- UI: Cleaned up sidebar dividers and icons.
-- Fix: Resolved data overwriting bug in filter logic.
