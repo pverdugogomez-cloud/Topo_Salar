@@ -267,7 +267,7 @@ if uploaded_files:
         df_list = []
         for u_file in uploaded_files:
             if u_file.name.endswith('.csv'):
-                temp_df = pd.read_csv(u_file)
+                temp_df = pd.read_csv(u_file, low_memory=False)
             else:
                 temp_df = pd.read_excel(u_file)
             temp_df.columns = temp_df.columns.str.strip()
