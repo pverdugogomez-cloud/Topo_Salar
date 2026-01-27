@@ -5,7 +5,7 @@ import os
 import json
 import io
 from datetime import datetime
-import topo_logic
+import topo_logic as topo_logic
 import importlib
 importlib.reload(topo_logic)
 import traceback
@@ -92,15 +92,36 @@ def generate_excel_report(global_res_dict, col_map=None):
                     # Logic gives 0-100 value.
                     ws1.write(curr_row+2+i,4,r['Porcentaje'],f_custom_pct)
                 
-                # Chart
-                ch = wb.add_chart({'type':'bar'})
+                # Chart (Column = Vertical, Bar = Horizontal in Excel)
+                ch = wb.add_chart({'type':'column'})
+                
+                # Define data range
+                # Categories: Column C (Rango) -> col index 2
+                # Values: Column E (Porcentaje) -> col index 4 (or Cantidad index 3?)
+                # Dashboard uses Count (Puntos) for chart. Excel likely too. Dashboard: y=data['tbl']['Puntos']
+                # So Values = Column D (Puntos) -> col index 3.
+                
+                # Dynamic Series with custom point colors is hard in xlsxwriter simple syntax.
+                # However, 'vary_colors': True assigns different colors automatically. 
+                # To match EXACT custom colors (Red,Yellow,Green...) per bar, we need 'points'.
+                
+                points_list = []
+                for _, r in data['tbl'].iterrows():
+                    points_list.append({'fill': {'color': r['Color'] if 'Color' in r else '#203764'}})
+                
                 ch.add_series({
                     'name': f'{poza_id} - Turno {t}',
-                    'categories': ['Resumen Ejecutivo', curr_row+2, 2, curr_row+9, 2],
-                    'values':     ['Resumen Ejecutivo', curr_row+2, 4, curr_row+9, 4],
-                    'fill':       {'color': '#203764'} # Uniform Color
+                    'categories': ['Resumen Ejecutivo', curr_row+2, 2, curr_row+2+len(data['tbl'])-1, 2],
+                    'values':     ['Resumen Ejecutivo', curr_row+2, 3, curr_row+2+len(data['tbl'])-1, 3], # Values = Cantidad (Col 3)
+                    'points': points_list,
+                    'data_labels': {'value': True, 'position': 'outside_end'}
                 })
-                ws1.insert_chart(f'G{curr_row}', ch, {'x_scale':0.8, 'y_scale':0.8})
+                ch.set_title({'name': f"Distribución Turno {t}"})
+                ch.set_y_axis({'name': 'Cantidad'})
+                ch.set_x_axis({'name': 'Rango'})
+                ch.set_legend({'position': 'none'}) # Hide legend if bars are colored individually by category
+                
+                ws1.insert_chart(f'G{curr_row}', ch, {'x_scale':1.5, 'y_scale':1.0})
                 curr_row += 16
             
             curr_row += 2 # Espacio entre pozas
@@ -327,6 +348,18 @@ if uploaded_files:
         st.error(f"Error cargando archivos: {e}")
         traceback.print_exc()
         df = None
+
+if df is not None:
+    with st.sidebar.expander("🛠️ Debug Info (Desarrollo)", expanded=False):
+        st.write(f"Total Filas: {len(df)}")
+        st.write(f"Cols: {list(df.columns)}")
+        st.write("Unique Pozas:", df['PozaID'].unique())
+        st.write("Unique Fechas:", df['Fecha'].unique())
+        st.write("Unique Turnos:", df['Turno'].unique())
+        st.write(f"Col Tiempo detectada: {c_time}")
+        if c_time:
+             st.write("Sample Date Raw:", df[c_time].iloc[0])
+             st.write("Sample Date Parsed:", str(df['DT'].iloc[0]))
 # ==========================================
 # 3. SIDEBAR CONFIG & FILTERS (PERSISTENT UI)
 # ==========================================
@@ -393,8 +426,38 @@ with st.sidebar:
                 st.success(f"Base de datos actualizada: {len(new_db)} registros.")
                 st.rerun()
 
-        # --- 2. CONFIGURACIÓN DE ESPESOR (COVER) ---
-        st.subheader("2. Configuración de Espesor (Cover)")
+        # --- 2. CRITERIO PUNTOS BAJOS ---
+        st.subheader("2. Criterio Puntos Bajos")
+        
+        criterio_eval = st.selectbox("Seleccione Criterio de Evaluación:", ["Criterio SQM", "Criterio Excon"], index=0, key="sel_criterio_main")
+        
+        # Legend Table
+        if criterio_eval == "Criterio Excon":
+            st.markdown("""
+            **Leyenda Criterio Excon:**
+            | Color | Clasificación | Rango (cm) |
+            | :---: | :--- | :--- |
+            | <span style='color:#FF0000; font-size:1.5em;'>●</span> | **Crítico Bajo** | $\le$ Tol (-15 o -10) |
+            | <span style='color:#FFC000; font-size:1.5em;'>●</span> | **Bajo Tolerable** | > Tol y $\le$ -4 |
+            | <span style='color:#00B050; font-size:1.5em;'>●</span> | **Conforme** | > -4 y $\le$ 4 |
+            | <span style='color:#00B0F0; font-size:1.5em;'>●</span> | **Sobrelevación Leve** | > 4 y $\le$ 10 |
+            | <span style='color:#002060; font-size:1.5em;'>●</span> | **Sobrelevación Crítica** | > 10 |
+            """, unsafe_allow_html=True)
+        else:
+            st.markdown("""
+            **Leyenda Criterio SQM:**
+            | Color | Clasificación | Rango |
+            | :---: | :--- | :--- |
+            | <span style='color:#FF0000; font-size:1.5em;'>●</span> | **Corte Crítico** | > 3x Tol |
+            | <span style='color:#FF0000; font-size:1.5em;'>●</span> | **Corte Alto** | 2x a 3x Tol |
+            | <span style='color:#FF8C00; font-size:1.5em;'>●</span> | **Corte Alerta** | 1x a 2x Tol |
+            | <span style='color:#00B050; font-size:1.5em;'>●</span> | **OK (Corte)** | 0 a 1x Tol |
+            | <span style='color:#00B050; font-size:1.5em;'>●</span> | **OK (Relleno)** | -1x Tol a 0 |
+            | <span style='color:#FFC000; font-size:1.5em;'>●</span> | **Relleno Alerta** | -2x a -1x Tol |
+            | <span style='color:#FFC000; font-size:1.5em;'>●</span> | **Relleno Bajo** | -3x a -2x Tol |
+            | <span style='color:#FF0000; font-size:1.5em;'>●</span> | **Relleno Crítico** | < -3x Tol |
+            """, unsafe_allow_html=True)
+            
         st.warning("⚠️ Si no se encuentra Cover en la BD, DEBE ingresarlo manualmente en la tabla.")
 
         active_pozas = unique_pozas_all if df is not None else []
@@ -655,18 +718,21 @@ if apply_filters and df is not None:
         # 20-30cm: 10%
         # < 20cm: All (Using 0.0 or minimal step like 2.0cm for noise filtering)
         
-        tol_calculated = 4.0 # Default fallback
-        if cov_used > 45:
-            tol_calculated = cov_used * 0.50
-        elif cov_used >= 30:
-            tol_calculated = cov_used * 0.30
-        elif cov_used >= 20:
-            tol_calculated = cov_used * 0.10
-        elif cov_used > 0:
-            # "De 20 para abajo son todos" -> Strict tolerance. 
-            # effectively 0, but let's use 2.0cm to filter GPS noise unless user wants loose raw data.
-            # Interpreting "son todos" as "any negative deviation is a defect".
-            tol_calculated = 0.0 
+        if criterio_eval == "Criterio Excon":
+            # REGLA EXCON:
+            # - Si Cover > 50cm -> Tol = 15cm (Detectar < -15)
+            # - Si Cover <= 50cm -> Tol = 10cm (Detectar < -10)
+            tol_calculated = 15.0 if cov_used > 50 else 10.0
+        else:
+            # REGLA SQM (Original)
+            if cov_used > 45:
+                tol_calculated = cov_used * 0.50
+            elif cov_used >= 30:
+                tol_calculated = cov_used * 0.30
+            elif cov_used >= 20:
+                tol_calculated = cov_used * 0.10
+            elif cov_used > 0:
+                tol_calculated = 0.0 
         
         if pid in edited_config.index:
             ras_used = edited_config.loc[pid, 'Rasante']
@@ -686,7 +752,8 @@ if apply_filters and df is not None:
                 col_z=cz, # Passing Elevation Column
                 col_n=cn, col_e=ce,
                 step=tol_step_val, 
-                cover_cm=cov_used
+                cover_cm=cov_used,
+                criterio=criterio_eval
             )
             
             poza_res[t] = {
@@ -710,9 +777,14 @@ if apply_filters and df is not None:
             src_cov = poza_data['Config']['Source']
             
             # Calculate what tolerance was likely used for display
+            # Calculate what tolerance was likely used for display
             if cov_used > 0:
-                dyn_tol = topo_logic.calculate_dynamic_tolerance(cov_used)
-                tol_label = f"{dyn_tol:.1f}cm (Dinámica)"
+                if criterio_eval == "Criterio Excon":
+                     dyn_tol = 15.0 if cov_used > 50 else 10.0
+                     tol_label = f"{dyn_tol:.1f}cm (Excon)"
+                else:
+                    dyn_tol = topo_logic.calculate_dynamic_tolerance(cov_used)
+                    tol_label = f"{dyn_tol:.1f}cm (Dinámica)"
             else:
                 dyn_tol = 4.0 # Default fallback
                 tol_label = "PENDIENTE (Falta Espesor)"
@@ -740,7 +812,7 @@ if apply_filters and df is not None:
                         txt = topo_logic.generar_texto_analisis(data['tbl'], data['zonas'], data['atot'], f"{pid}_{t}")
                         st.text_area("Análisis:", value=txt, height=150, disabled=True)
                         
-                        # TABLE (Hide Color column)
+                        # TABLE (Restore 'Tipo', hide 'Color')
                         df_show = data['tbl'].drop(columns=['Color'], errors='ignore')
                         # Explicit integer formatting for coordinates and area
                         format_dict = {
@@ -751,19 +823,26 @@ if apply_filters and df is not None:
                         }
                         st.dataframe(df_show.style.format(format_dict, na_rep=""), use_container_width=True)
                         
-                        # CHART (Uniform Color)
+                        # CHART (Vertical Bars with Colors)
                         fig = go.Figure()
                         # Use colors from logic if available
                         colors_mapped = [row['Color'] for _, row in data['tbl'].iterrows()] if 'Color' in data['tbl'].columns else None
                         
                         fig.add_trace(go.Bar(
-                            x=data['tbl']['Rango'], y=data['tbl']['Puntos'],
-                            text=data['tbl']['Puntos'], textposition='auto',
-                            marker_color=colors_mapped
+                            x=data['tbl']['Rango'], # X Axis = Labels (Ranges)
+                            y=data['tbl']['Puntos'], # Y Axis = Count (Height)
+                            text=data['tbl']['Puntos'], 
+                            textposition='auto',
+                            marker_color=colors_mapped # Specific colors per bar
                         ))
-                        # Default Plotly blue is fine, or specify a single color like 'marker_color="#203764"' if desired. 
-                        # User said "all same color", default is same color.
-                        fig.update_layout(title=f"Distribución Turno {t}", height=300, margin=dict(l=20,r=20,t=40,b=20))
+                        
+                        fig.update_layout(
+                            title=f"Distribución Turno {t}", 
+                            height=300, 
+                            margin=dict(l=20,r=20,t=40,b=20),
+                            xaxis_title="Rango",
+                            yaxis_title="Cantidad de Puntos"
+                        )
                         st.plotly_chart(fig, use_container_width=True)
 
             with t_map:
@@ -787,7 +866,9 @@ if apply_filters and df is not None:
                              data['df'], data['zonas'], 
                              col_n=cn, col_e=ce,
                              titulo=f"Mapa {pid} - Turno {t}",
-                             tol=dyn_tol
+                             tol=dyn_tol,
+                             criterio=criterio_eval,
+                             cover_cm=cov_used
                          )
                          
                          if isinstance(fig_map, str):

@@ -113,6 +113,51 @@ def calculate_dynamic_tolerance(cover_cm):
     else:
         return 0.5 # Menor a 20cm, tolerancia cero (usamos 0.5 para estabilidad numérica)
 
+def calcular_rangos_excon(df, cover_cm):
+    """
+    Calcula estadísticas para CRITERIO EXCON (5 Colores).
+    Reglas:
+    - Tol_Inf: -15 si Cover > 50, sino -10.
+    - Rojo: <= Tol_Inf
+    - Amarillo: (Tol_Inf, -4]
+    - Verde: (-4, +4]
+    - Celeste: (+4, +10]
+    - Azul: > +10
+    """
+    if df.empty: return pd.DataFrame(), df
+    df = df.copy()
+    
+    # Asegurar Desv_cm
+    if 'Desv_cm' not in df.columns:
+        if 'desviacion' in df.columns: df['Desv_cm'] = df['desviacion']
+        else: df['Desv_cm'] = 0.0
+
+    # Determinar Tolerancia Inferior
+    tol_inf = -15.0 if cover_cm > 50 else -10.0
+    
+    # Tolerancia Inferior (as string for labels if needed, but we use strict numeric logic)
+    t_inf_val = int(tol_inf)
+    
+    ranges = [
+        # (Label (Range Only), Condition, GroupName (Description), Color)
+        (f'<= {t_inf_val}',          lambda x: x <= tol_inf,                  'Critico Bajo',     '#FF0000'), # Rojo
+        (f'{t_inf_val} a -4',        lambda x: (x > tol_inf) & (x <= -4),     'Bajo Tolerable',   '#FFC000'), # Amarillo
+        ('-4 a 4',                   lambda x: (x > -4) & (x <= 4),           'Conforme',         '#00B050'), # Verde
+        ('4 a 10',                   lambda x: (x > 4) & (x <= 10),           'Sobrelevación Leve', '#00B0F0'), # Celeste
+        ('> 10',                     lambda x: x > 10,                        'Sobrelevación Crítica', '#002060')  # Azul
+    ]
+    
+    res, total = [], len(df)
+    for lbl, cond, grp, color in ranges:
+        c = len(df[cond(df['Desv_cm'])])
+        res.append({
+            'Tipo': grp, 'Rango': lbl, 'Puntos': c, 
+            'Porcentaje': (c/total)*100 if total > 0 else 0,
+            'Color': color
+        })
+    
+    return pd.DataFrame(res), df
+
 def flood_fill_matrix(matrix):
     """Identifica zonas conectadas en una matriz binaria."""
     rows, cols = matrix.shape
@@ -207,7 +252,7 @@ def detectar_zonas(df, col_n, col_e, col_z, tol):
 
 # ... (Previous imports) ...
 
-def generar_mapa_interactivo(df, zonas_df, col_n, col_e, titulo, tol):
+def generar_mapa_interactivo(df, zonas_df, col_n, col_e, titulo, tol, criterio="Criterio SQM", cover_cm=0.0):
     """Genera un mapa INTERACTIVO (Plotly) de CALOR (Estilo Técnico XY - Match Excel)."""
     try:
         # Limpieza
@@ -215,15 +260,32 @@ def generar_mapa_interactivo(df, zonas_df, col_n, col_e, titulo, tol):
         df[col_e] = pd.to_numeric(df[col_e], errors='coerce')
         df_clean = df.replace([np.inf, -np.inf], np.nan).dropna(subset=[col_n, col_e, 'Desv_cm'])
         
+        
         if df_clean.empty: return f"Error: Sin datos válidos."
         
-        # Color Semáforo (Rojo/Amarillo/Verde)
-        def get_color_semaforo(x):
-            if x < -tol: return '#FF0000' # Rojo
-            elif x < 0: return '#FFC000'  # Amarillo
-            else: return '#00B050'        # Verde
-
-        point_colors = df_clean['Desv_cm'].apply(get_color_semaforo).tolist()
+        # Lógica de Color según Criterio
+        point_colors = []
+        
+        if criterio == "Criterio Excon":
+            # Tol_Inf depende de Cover
+            tol_inf = -15.0 if cover_cm > 50 else -10.0
+            
+            def get_color_excon(x):
+                if x <= tol_inf: return '#FF0000'       # Rojo
+                elif x <= -4: return '#FFC000'          # Amarillo
+                elif x <= 4: return '#00B050'           # Verde
+                elif x <= 10: return '#00B0F0'          # Celeste
+                else: return '#002060'                  # Azul
+            
+            point_colors = df_clean['Desv_cm'].apply(get_color_excon).tolist()
+            
+        else:
+            # Criterio SQM (Original) - Semáforo
+            def get_color_semaforo(x):
+                if x < -tol: return '#FF0000' # Rojo
+                elif x < 0: return '#FFC000'  # Amarillo
+                else: return '#00B050'        # Verde
+            point_colors = df_clean['Desv_cm'].apply(get_color_semaforo).tolist()
 
         fig = go.Figure()
         
@@ -297,7 +359,7 @@ def generar_mapa_interactivo(df, zonas_df, col_n, col_e, titulo, tol):
         traceback.print_exc()
         return f"Error General Mapa: {str(e)}"
 
-def procesar_turno(df, rasante, tolerancia, col_z, col_n, col_e, step=4.0, cover_cm=0.0):
+def procesar_turno(df, rasante, tolerancia, col_z, col_n, col_e, step=4.0, cover_cm=0.0, criterio="Criterio SQM"):
     """Procesa un turno completo y retorna resultados."""
     if df.empty:
         return pd.DataFrame(), pd.DataFrame(), pd.DataFrame(), 0.0
@@ -312,7 +374,10 @@ def procesar_turno(df, rasante, tolerancia, col_z, col_n, col_e, step=4.0, cover
     # Let's trust the caller provided 'tolerancia' is the correct cut-off.
         
     # 2. Calcular Estadísticas (VISUAL / DISTRIBUCIÓN)
-    tbl_rangos, df_cal = calcular_rangos(df, rasante, step=step)
+    if criterio == "Criterio Excon":
+        tbl_rangos, df_cal = calcular_rangos_excon(df, cover_cm)
+    else:
+        tbl_rangos, df_cal = calcular_rangos(df, rasante, step=step)
     
     # 3. Detectar Zonas Defectuosas (CRITERIO TÉCNICO / TRAFICO)
     # UPDATED call with col_z
