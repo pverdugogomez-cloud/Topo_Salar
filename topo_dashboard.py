@@ -349,17 +349,7 @@ if uploaded_files:
         traceback.print_exc()
         df = None
 
-if df is not None:
-    with st.sidebar.expander("🛠️ Debug Info (Desarrollo)", expanded=False):
-        st.write(f"Total Filas: {len(df)}")
-        st.write(f"Cols: {list(df.columns)}")
-        st.write("Unique Pozas:", df['PozaID'].unique())
-        st.write("Unique Fechas:", df['Fecha'].unique())
-        st.write("Unique Turnos:", df['Turno'].unique())
-        st.write(f"Col Tiempo detectada: {c_time}")
-        if c_time:
-             st.write("Sample Date Raw:", df[c_time].iloc[0])
-             st.write("Sample Date Parsed:", str(df['DT'].iloc[0]))
+
 # ==========================================
 # 3. SIDEBAR CONFIG & FILTERS (PERSISTENT UI)
 # ==========================================
