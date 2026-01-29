@@ -1,10 +1,11 @@
 streamlit
 pandas
 numpy
+matplotlib
 plotly
+scipy
+python-pptx
+pyproj
+google-generativeai
 xlsxwriter
 openpyxl
-kaleido
-matplotlib
-contextily
-pyproj
