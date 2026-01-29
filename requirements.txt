@@ -9,3 +9,4 @@ pyproj
 google-generativeai
 xlsxwriter
 openpyxl
+contextily

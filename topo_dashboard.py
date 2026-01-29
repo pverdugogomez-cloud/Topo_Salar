@@ -126,6 +126,21 @@ if 'api_key_to_use' not in st.session_state:
 # ==========================================
 # GESTIÓN DE BASES DE DATOS (JSON)
 # ==========================================
+@st.cache_data
+def load_db():
+    if not os.path.exists("base_datos_pozas.json"):
+        return {}
+    with open("base_datos_pozas.json", "r") as f:
+        return json.load(f)
+
+def save_db(db_dict):
+    """Guarda la base de datos de pozas en JSON."""
+    with open("base_datos_pozas.json", "w") as f:
+        json.dump(db_dict, f, indent=4)
+
+if 'db_pozas' not in st.session_state:
+    st.session_state.db_pozas = load_db()
+
 # Helper for Metrics
 def calculate_metrics_from_points(points, col_x='Este', col_y='Norte'):
     """Calcula distancia (2 ptos) o área/perímetro (>2 ptos)."""
@@ -583,7 +598,7 @@ with st.sidebar:
         st.divider()
 
         active_pozas = unique_pozas_all if df is not None else []
-        tol_step_val = 4.0 
+        tol_step_val = 4.0 |1
         
         # STATEFUL COVER EDITOR logic
         # Check if we need to rebuild the state (file changed or first run)
