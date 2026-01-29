@@ -598,7 +598,7 @@ with st.sidebar:
         st.divider()
 
         active_pozas = unique_pozas_all if df is not None else []
-        tol_step_val = 4.0 |1
+        tol_step_val = 4.0
         
         # STATEFUL COVER EDITOR logic
         # Check if we need to rebuild the state (file changed or first run)
