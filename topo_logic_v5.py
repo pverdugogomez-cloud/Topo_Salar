@@ -446,7 +446,7 @@ def generar_mapa_interactivo(df, zonas_df, col_n, col_e, titulo, tol, criterio="
 
 def filtrar_islas_registros(df, col_n, col_e, cell_size=15.0):
     """
-    Filtra 'islas' o ruido lejano manteniendo solo el componente conexo más grande.
+    Filtra 'islas' o ruido lejano, manteniendo TODAS las islas significativas (> 20 celdas ~ 1000m2).
     Usa una grilla gruesa (cell_size) para detectar conectividad.
     """
     if df.empty: return df
@@ -466,42 +466,40 @@ def filtrar_islas_registros(df, col_n, col_e, cell_size=15.0):
         
         max_r, max_c = r_idx.max() + 1, c_idx.max() + 1
         
-        # Si la grilla es muy gigante (muy dispersa), abortar para no comer RAM
-        if max_r * max_c > 5000000: # 5 millones de celdas
-             return df
+        # Si la grilla es muy gigante (muy dispersa), abortar
+        if max_r * max_c > 5000000: return df
              
         grid = np.zeros((max_r, max_c), dtype=int)
-        
-        # Marcar celdas ocupadas
-        # Usamos numpy indexing directo (rápido)
-        grid[r_idx, c_idx] = 1
+        grid[r_idx, c_idx] = 1 # Marcar celdas
         
         # 2. Etiquetar Componentes Conexos
-        # structure defines connectivity (3x3 includes diagonals)
         structure = np.ones((3,3), dtype=int) 
         labeled_array, num_features = label(grid, structure=structure)
         
-        if num_features <= 1:
-            return df # Todo está conectado o vacío
+        if num_features <= 1: return df
             
-        # 3. Encontrar el Componente Mayor (con más celdas ocupadas)
-        # bincount cuenta ocurrencias de cada label (0 es fondo, ignorar)
+        # 3. Encontrar TODOS los componentes grandes
         counts = np.bincount(labeled_array.flat)
-        counts[0] = 0 # Ignorar fondo
-        main_label = counts.argmax()
+        # counts[0] is background
         
-        # 4. Filtrar DataFrame
-        # Mapear cada punto a su label
+        # Threshold: 20 cells * (5m * 5m) = 500m2 approx minimum
+        min_cells = 20
+        
+        valid_labels = []
+        for i in range(1, len(counts)):
+            if counts[i] >= min_cells:
+                valid_labels.append(i)
+                
+        # If no significant islands found, fallback to largest logic (to avoid empty)
+        if not valid_labels:
+             counts[0] = 0
+             valid_labels = [counts.argmax()]
+        
+        # 4. Filtrar DataFrame (Faster using isin)
         point_labels = labeled_array[r_idx, c_idx]
-        
-        # Mantener solo los puntos del main_label
-        mask = (point_labels == main_label)
+        mask = np.isin(point_labels, valid_labels)
         
         df_filtered = df[mask].copy()
-        
-        # Logging (invisible here but useful)
-        # print(f"Filtrado Islas: {len(df)} -> {len(df_filtered)} puntos.")
-        
         return df_filtered
         
     except Exception as e:
@@ -545,8 +543,8 @@ def interpolate_survey_data(df, col_n, col_e, col_z, grid_size=1.0):
         # Query nearest distance for each grid point
         dists, _ = tree.query(grid_points)
         
-        # Max distance threshold: 3.0m (Strict cut for 5m spacing, removing 'buffer')
-        valid_mask = dists <= 3.0
+        # Max distance threshold: 2.0m (Strict blade width simulation)
+        valid_mask = dists <= 2.0
         
         # Flatten and Filter
         df_dense = pd.DataFrame({
@@ -582,34 +580,50 @@ def procesar_turno(df, rasante, tolerancia, col_z, col_n, col_e, step=4.0, cover
         return pd.DataFrame(), pd.DataFrame(), pd.DataFrame(), 0.0
         
     # --- STEP 0: CLEAN NOISE / ISLANDS (User Request) ---
-    # Automatically Keep only largest connected component (Main Road)
-    df = filtrar_islas_registros(df, col_n, col_e, cell_size=8.0)
-
+    # Automatically Keep ALL significant connected components (Main Roads)
+    # df = filtrar_islas_registros(df, col_n, col_e, cell_size=8.0) # Old Single-Island
+    
+    # NEW LOGIC: Multi-Island Retention
+    # Use same function but upgraded logic inside (we will update the function definition below/above)
+    # actually, let's update the function logic first. But assuming it works:
+    df_visual = filtrar_islas_registros(df, col_n, col_e, cell_size=5.0) 
+    
     # 1. Tolerancia Dinámica (Si hay Cover)
     tol_detect = tolerancia
-    # NOTE: topo_dashboard passes calculated tolerance in 'tolerancia' arg already if logic updated there.
-    # But if not, we re-calc here? 
-    # Current topo_dashboard calls with 'tolerancia=tol_calculated'. So we trust input.
-    pass 
-    # Logic note: 'calculate_dynamic_tolerance' usage inside here might be redundant if caller handles it.
-    # Let's trust the caller provided 'tolerancia' is the correct cut-off.
-        
-    # 2. Calcular Estadísticas (VISUAL / DISTRIBUCIÓN)
-    # 2. Calcular Estadísticas (VISUAL / DISTRIBUCIÓN)
+
+    # ... (Tolerance logic unchanged) ...
+
     # 2. Calcular Estadísticas (VISUAL / DISTRIBUCIÓN)
     if criterio == "Criterio Excon":
-        tbl_rangos, df_processed = calcular_rangos_excon(df, cover_cm) # Capture df with Desv_cm
+        tbl_rangos, df_processed = calcular_rangos_excon(df_visual, cover_cm) # Use filtered RAW data
         
         # Override tolerance for detection to match Excon Visuals
         tol_detect = 15.0 if cover_cm > 50 else 10.0
         
-        # INTERPOLATION FOR DENSE DETECTION (Area > 9m2 requires grid connectivity)
+        # INTERPOLATION FOR DENSE DETECTION (Calculation Only)
         # Use df_processed which has 'Desv_cm' guaranteed
+        # Reduced Grid Size / Radius to 2.0m (Blade buffer)
         df_cal = interpolate_survey_data(df_processed, col_n, col_e, col_z, grid_size=1.0)
         
+        # IMPORTANT: Visual DF must have 'Desv_cm' populated
+        df_visual = df_processed 
+
     else:
-        tbl_rangos, df_cal = calcular_rangos(df, rasante, step=step)
+        tbl_rangos, df_cal = calcular_rangos(df_visual, rasante, step=step)
         tol_detect = tolerancia
+        
+        # In this branch, df_cal is just the df with ranges, no dense interp unless we added it?
+        # Actually calcular_rangos returns (summary, df_with_desv).
+        # But we need consistent naming.
+        df_visual = df_cal # This has Desv_cm
+        
+        # If we want dense calculation for SQM too, we should interpolate.
+        # But for now, let's just make it consistent.
+        # Wait, detects_zonas uses df_cal.
+        # If we don't interpolate for SQM, the area calculation might be off if points are sparse?
+        # Previous logic did NOT interpolate for SQM. Let's keep it safe.
+
+
     
     # 3. Detectar Zonas Defectuosas (CRITERIO TÉCNICO / TRAFICO)
     # UPDATED call with col_z
@@ -649,7 +663,7 @@ def procesar_turno(df, rasante, tolerancia, col_z, col_n, col_e, step=4.0, cover
     elif not zonas.empty:
         zonas['KPI Incidencia'] = 0.0
         
-    return tbl_rangos, df_cal, zonas, area_turno_total
+    return tbl_rangos, df_cal, zonas, area_turno_total, df_visual
 
 def generar_texto_analisis(stats_df, zonas_df, atot, poza):
     """Genera el texto de análisis técnico para el reporte."""
