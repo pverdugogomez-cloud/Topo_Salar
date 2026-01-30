@@ -1,0 +1,13 @@
+streamlit
+pandas
+numpy
+matplotlib
+xlsxwriter
+openpyxl
+contextily
+scipy
+pyproj
+streamlit-plotly-events
+google-generativeai
+plotly
+python-pptx
