@@ -11,7 +11,13 @@ importlib.reload(topo_logic)
 import traceback
 import plotly.graph_objects as go
 import gspread
+import gspread
 from oauth2client.service_account import ServiceAccountCredentials
+import db_manager
+import google.generativeai as genai
+from google.api_core import exceptions as google_exceptions
+import time
+import math
 
 
 # ==========================================
@@ -122,6 +128,160 @@ def save_db(data):
             
         except Exception as e:
             st.error(f"Error guardando en Nube: {e}")
+
+# ==========================================
+# FUNCIONES AUXILIARES IA & HISTORY
+# ==========================================
+@st.dialog("Gestor de Historial de Calidad", width="large")
+def show_history_modal():
+     st.info("Aquí podrá visualizar y editar el historial de puntos bajos detectados.")
+     
+     hist_df = db_manager.load_history()
+     
+     if hist_df.empty:
+         st.warning("No hay historial disponible aún.")
+     else:
+         # Filters for View
+         col_f1, col_f2 = st.columns(2)
+         with col_f1:
+             f_poza = st.selectbox("Filtrar por Poza:", ["TODOS"] + sorted(hist_df['Poza'].unique().tolist()), key="hist_filter_poza")
+         with col_f2:
+             f_estado = st.selectbox("Filtrar por Estado:", ["TODOS"] + sorted(hist_df['Estado'].unique().tolist()), key="hist_filter_estado")
+         
+         # Apply Filters
+         df_view = hist_df.copy()
+         if f_poza != "TODOS":
+             df_view = df_view[df_view['Poza'] == f_poza]
+         if f_estado != "TODOS":
+             df_view = df_view[df_view['Estado'] == f_estado]
+             
+         # Editable Dataframe
+         edited_hist = st.data_editor(
+             df_view,
+             column_order=("ID", "Fecha_Reporte", "Turno", "Poza", "Cota_Teorica", "Norte", "Este", "Cota_GPS", "Desv_GPS", "Cota_Real_Terreno", "Desv_Real", "Observacion", "Estado"),
+             column_config={
+                 "ID": st.column_config.NumberColumn("ID", disabled=True, width="small"),
+                 "ID_Unico": None, # Hide Hash
+                 "Fecha_Reporte": st.column_config.TextColumn("Fecha", disabled=True),
+                 "Turno": st.column_config.TextColumn("Turno", disabled=True, width="small"),
+                 "Poza": st.column_config.TextColumn("Poza", disabled=True),
+                 "Cota_Teorica": st.column_config.NumberColumn("Rasante (m)", disabled=True, format="%.3f"),
+                 "Norte": st.column_config.NumberColumn("Norte", disabled=True, format="%.0f"),
+                 "Este": st.column_config.NumberColumn("Este", disabled=True, format="%.0f"),
+                 "Cota_GPS": st.column_config.NumberColumn("Cota Sistema (m)", disabled=True, format="%.3f"),
+                 "Desv_GPS": st.column_config.NumberColumn("Desv. Sistema (cm)", disabled=True, format="%.1f"),
+                 "Cota_Real_Terreno": st.column_config.NumberColumn("Cota Real (m)", required=False, format="%.3f"),
+                 "Desv_Real": st.column_config.NumberColumn("Desv Real (cm)", disabled=True, format="%.1f"),
+                 "Observacion": st.column_config.TextColumn("Observación", width="medium"),
+                 "Estado": st.column_config.SelectboxColumn("Estado", options=["Pendiente", "Revisado", "Corregido", "Descartado"])
+             },
+             hide_index=True,
+             use_container_width=True,
+             key="hist_editor_main",
+             num_rows="dynamic"
+         )
+         
+         if st.button("Guardar Cambios Historial"):
+             # --- UPDATE LOGIC ---
+             for idx, row in edited_hist.iterrows():
+                 # Auto-calc deviation if real z changed
+                 if pd.notnull(row['Cota_Real_Terreno']) and pd.notnull(row['Cota_Teorica']):
+                     try:
+                         val_real = float(row['Cota_Real_Terreno'])
+                         val_teor = float(row['Cota_Teorica'])
+                         row['Desv_Real'] = (val_real - val_teor) * 100.0
+                     except: pass
+                 
+                 mask_id = hist_df['ID_Unico'] == row['ID_Unico']
+                 if mask_id.any():
+                     hist_df.loc[mask_id, 'Cota_Real_Terreno'] = row['Cota_Real_Terreno']
+                     hist_df.loc[mask_id, 'Desv_Real'] = row['Desv_Real']
+                     hist_df.loc[mask_id, 'Observacion'] = row['Observacion']
+                     hist_df.loc[mask_id, 'Estado'] = row['Estado']
+             
+             if db_manager.save_history(hist_df):
+                 st.success("Historial Actualizado.")
+                 st.rerun()
+             else:
+                 st.error("Error guardando historial.")
+         
+         # Export Button
+         excel_bytes = db_manager.export_to_excel(hist_df) 
+         st.download_button("📥 Descargar Excel Historial", excel_bytes, f"Historial_Calidad_{datetime.now().strftime('%Y%m%d')}.xlsx")
+
+def generar_comentario_ia(contexto_texto, api_key, model_name='gemini-2.0-flash', custom_instruction=None):
+    """
+    Genera un comentario técnico usando Gemini.
+    Retorna tupla: (texto_respuesta, info_uso)
+    """
+    try:
+        genai.configure(api_key=api_key)
+        clean_model_name = model_name.replace("models/", "")
+        model = genai.GenerativeModel(clean_model_name)
+        
+        base_instruction = """
+        ERES UN MOTOR DE ANÁLISIS TÉCNICO AUTOMATIZADO. 
+        TU SALIDA DEBE SER ESTRICTAMENTE EL REPORTE TÉCNICO.
+        PROHIBIDO: Saludos, introducciones, despedidas.
+        PROHIBIDO: Repetir el nombre de la Poza o Títulos como "Informe Técnico".
+        SOLO DATOS Y RECOMENDACIONES.
+        """
+        
+        user_criteria = custom_instruction if custom_instruction else """
+        Actúa como un Ingeniero Geomensor experto en control de calidad.
+        Genera un comentario técnico breve (máximo 3 líneas) con recomendaciones operativas.
+        """
+
+        prompt = f"""
+        {base_instruction}
+        
+        CRITERIOS DEL USUARIO:
+        {user_criteria}
+        
+        Datos del Análisis:
+        {contexto_texto}
+        """
+        
+        response = model.generate_content(prompt)
+        
+        usage_info = "Información de tokens no disponible"
+        if hasattr(response, 'usage_metadata'):
+            u = response.usage_metadata
+            usage_info = f"Tokens: {u.prompt_token_count} (Entrada) + {u.candidates_token_count} (Salida) = {u.total_token_count} Total"
+            
+        return response.text, usage_info
+
+    except google_exceptions.ResourceExhausted:
+        return "⏳ **Límite de Cuota Alcanzado (Error 429):** Por favor espera unos 30 segundos antes de intentar de nuevo.", None
+    except Exception as e:
+        return f"❌ Error generando comentario ({type(e).__name__}): {str(e)}", None
+
+def calculate_metrics_from_points(points, col_x='Este', col_y='Norte'):
+    """Calcula distancia (2 ptos) o área/perímetro (>2 ptos)."""
+    if not points or len(points) < 2: return None
+    try:
+        coords = [(float(p.get(col_x,0)), float(p.get(col_y,0))) for p in points]
+    except: return None
+        
+    results = {}
+    
+    # 1. Distancia Total (Perímetro)
+    perimeter = 0.0
+    for i in range(len(coords)-1):
+        x1, y1 = coords[i]
+        x2, y2 = coords[i+1]
+        perimeter += math.sqrt((x2-x1)**2 + (y2-y1)**2)
+    results['Longitud'] = perimeter
+    
+    # 2. Área (Solo si >= 3 puntos)
+    if len(coords) >= 3:
+        x_pts = [c[0] for c in coords]
+        y_pts = [c[1] for c in coords]
+        area = 0.5 * abs(sum(x_pts[i]*y_pts[(i+1)%len(coords)] - x_pts[(i+1)%len(coords)]*y_pts[i]
+                             for i in range(len(coords))))
+        results['Area'] = area
+        
+    return results
 
 # ==========================================
 # FUNCIONES AUXILIARES UI
@@ -767,7 +927,111 @@ with st.sidebar:
 
     if st.button("PROCESAR RESULTADOS", type="primary", use_container_width=True, key="btn_process"):
         st.session_state['processing_active'] = True
+        # Clear AI Cache on explicit new process
+        keys_to_clear = [k for k in st.session_state.keys() if k.startswith("ai_res_")]
+        for k in keys_to_clear:
+            del st.session_state[k]
         st.rerun()
+
+    st.divider()
+    if st.button("GESTIONAR PUNTOS BAJOS (HISTORIAL)", type="secondary", use_container_width=True):
+        show_history_modal()
+
+    # --- ADMIN PANEL (BOTTOM) ---
+    st.divider()
+    st.caption("Configuración Avanzada v5.0")
+    with st.expander("🔐 Panel de Administrador (IA)", expanded=False):
+        # Load current settings
+        current_settings = topo_logic.load_settings()
+        
+        # Simple Session State Login
+        if 'admin_logged_in' not in st.session_state:
+            st.session_state['admin_logged_in'] = False
+        
+        if not st.session_state['admin_logged_in']:
+            pwd = st.text_input("Contraseña de Admin:", type="password", key="admin_pwd_input")
+            if st.button("Ingresar Panel"):
+                if pwd == current_settings.get("admin_password", "excon"):
+                    st.session_state['admin_logged_in'] = True
+                    st.rerun()
+                else:
+                    st.error("Contraseña incorrecta")
+        else:
+            st.success("🔓 Acceso Concedido")
+            if st.button("Cerrar Sesión"):
+                st.session_state['admin_logged_in'] = False
+                st.rerun()
+            
+            st.subheader("Configuración General")
+            
+            # 1. AI Toggle
+            ai_enabled = st.toggle("Activar Generación IA", value=current_settings.get("ai_enabled", True))
+            
+            # 2. API Key Management
+            st.markdown("**Gestión API Key:**")
+            api_key_system = st.secrets.get("gemini_api_key", None)
+            if api_key_system:
+                    st.info(f"🔑 Clave cargada desde archivo (secrets.toml).")
+                    st.session_state['api_key_to_use'] = api_key_system
+            else:
+                    st.warning("No hay clave en secrets.toml")
+                    user_key = st.text_input("Ingresar Key Manualmente:", type="password", value=st.session_state.get('api_key_to_use', ''))
+                    if user_key:
+                        st.session_state['api_key_to_use'] = user_key
+            
+            # 3. Model Selector
+            st.markdown("**Modelo de IA:**")
+            if st.session_state.get('api_key_to_use'):
+                try:
+                    genai.configure(api_key=st.session_state['api_key_to_use'])
+                    if 'gemini_models_list' not in st.session_state:
+                            models_iter = genai.list_models()
+                            st.session_state['gemini_models_list'] = [
+                                m.name.replace("models/", "") 
+                                for m in models_iter 
+                                if 'generateContent' in m.supported_generation_methods
+                            ]
+                    
+                    default_ix = 0
+                    saved_model = st.session_state.get('selected_ai_model', 'gemini-2.0-flash')
+                    if saved_model in st.session_state['gemini_models_list']:
+                            default_ix = st.session_state['gemini_models_list'].index(saved_model)
+                    
+                    selected_model = st.selectbox("Seleccionar Modelo:", st.session_state['gemini_models_list'], index=default_ix)
+                    st.session_state['selected_ai_model'] = selected_model
+                except:
+                    st.error("Error cargando modelos (Revisar Key)")
+            
+            # 4. Custom Prompt Editor
+            st.subheader("🧠 Cerebro de la IA (Prompt)")
+            new_prompt = st.text_area(
+                "Instrucciones para la IA (Definir rol y enfoque):", 
+                value=current_settings.get("system_prompt", ""),
+                height=200
+            )
+            
+            # Save Button
+            if st.button("💾 Guardar Configuración"):
+                new_settings = {
+                    "ai_enabled": ai_enabled,
+                    "system_prompt": new_prompt,
+                    "admin_password": current_settings.get("admin_password", "excon")
+                }
+                if topo_logic.save_settings(new_settings):
+                    st.success("Configuración guardada exitosamente.")
+                    st.rerun()
+                else:
+                    st.error("Error guardando configuración.")
+
+    # Load clean settings for usage in app
+    app_settings = topo_logic.load_settings()
+    st.session_state['app_ai_settings'] = app_settings
+    
+    # Initialize API Key from Secrets if available (Automatic Load)
+    if 'api_key_to_use' not in st.session_state:
+        secret_key = st.secrets.get("gemini_api_key", None)
+        if secret_key:
+            st.session_state['api_key_to_use'] = secret_key
 
 # ==========================================
 # PROCESSING & RESULTS
@@ -832,61 +1096,165 @@ if apply_filters and df is not None:
     global_results = {}
     groups = df_final.groupby('PozaID')
     
-    # Prepare result container for all pozas first
-    for pid, df_grp in groups:
-        # Config used
-        cov_used = cover_val_map.get(pid, 0.0)
-        source_cov = cover_src_map.get(pid, "Desconocido")
+    # Initialize Settings
+    ai_enabled = st.session_state.get('app_ai_settings', {}).get("ai_enabled", True)
+    active_key = st.session_state.get('api_key_to_use')
+    
+    # --- HISTORY: INIT BUFFER ---
+    hist_df_current = db_manager.load_history()
+    new_findings_buffer = []
+
+    # FORCE 2.0 FLASH if session has old model
+    curr_model = st.session_state.get('selected_ai_model', 'gemini-2.0-flash')
+    if "1.5-flash" in curr_model: 
+        curr_model = "gemini-2.0-flash"
+        st.session_state['selected_ai_model'] = curr_model
         
-        # --- NEW TIERED TOLERANCE CALCULATION ---
-        # Logic defined by user:
-        # > 45cm: 50%
-        # 30-45cm: 30%
-        # 20-30cm: 10%
-        # < 20cm: All (Using 0.0 or minimal step like 2.0cm for noise filtering)
-        
-        if criterio_eval == "Criterio Excon":
-            # REGLA EXCON:
-            # - Si Cover > 50cm -> Tol = 15cm (Detectar < -15)
-            # - Si Cover <= 50cm -> Tol = 10cm (Detectar < -10)
-            tol_calculated = 15.0 if cov_used > 50 else 10.0
-        else:
-            # REGLA SQM (Original)
-            if cov_used > 45:
-                tol_calculated = cov_used * 0.50
-            elif cov_used >= 30:
-                tol_calculated = cov_used * 0.30
-            elif cov_used >= 20:
-                tol_calculated = cov_used * 0.10
-            elif cov_used > 0:
-                tol_calculated = 0.0 
-        
-        if pid in edited_config.index:
-            ras_used = edited_config.loc[pid, 'Rasante']
-        else:
-            ras_used = 0.0
-        
-        poza_res = {'Config': {'Rasante': ras_used, 'Tol': tol_calculated, 'Cover': cov_used, 'Source': source_cov}}
-        turns_present = df_grp['Turno'].unique()
-        
-        for t in turns_present:
-            df_t = df_grp[df_grp['Turno'] == t]
+    model_to_use = curr_model
+    custom_prompt = st.session_state.get('app_ai_settings', {}).get("system_prompt", None)
+    
+    # WRAP WHOLE PROCESSING IN SPINNER
+    with st.spinner("🤖 Generando Análisis Técnico con Inteligencia Artificial..."):
+        for pid, df_grp in groups:
+            # Config used
+            cov_used = cover_val_map.get(pid, 0.0)
+            source_cov = cover_src_map.get(pid, "Desconocido")
             
-            # Logic calculation
-            res_tbl, df_proc, zonas, atot = topo_logic.procesar_turno(
-                df_t, ras_used, 
-                tolerancia=tol_calculated, 
-                col_z=cz, # Passing Elevation Column
-                col_n=cn, col_e=ce,
-                step=tol_step_val, 
-                cover_cm=cov_used,
-                criterio=criterio_eval
-            )
+            # --- NEW TIERED TOLERANCE CALCULATION ---
+            if criterio_eval == "Criterio Excon":
+                tol_calculated = 15.0 if cov_used > 50 else 10.0
+            else:
+                if cov_used > 45:
+                    tol_calculated = cov_used * 0.50
+                elif cov_used >= 30:
+                    tol_calculated = cov_used * 0.30
+                elif cov_used >= 20:
+                    tol_calculated = cov_used * 0.10
+                elif cov_used > 0:
+                    tol_calculated = 0.0 
+                else:
+                    tol_calculated = 4.0
             
-            poza_res[t] = {
-                'tbl': res_tbl, 'df': df_proc, 'zonas': zonas, 'atot': atot, 'vacio': False
-            }
-        global_results[pid] = poza_res
+            if pid in edited_config.index:
+                ras_used = edited_config.loc[pid, 'Rasante']
+            else:
+                ras_used = 0.0
+            
+            poza_res = {'Config': {'Rasante': ras_used, 'Tol': tol_calculated, 'Cover': cov_used, 'Source': source_cov}}
+            turns_present = df_grp['Turno'].unique()
+            
+            for t in turns_present:
+                df_t = df_grp[df_grp['Turno'] == t]
+                
+                try: 
+                    # Logic calculation
+                    res_tbl, df_proc, zonas, atot = topo_logic.procesar_turno(
+                        df_t, ras_used, 
+                        tolerancia=tol_calculated, 
+                        col_z=cz, # Passing Elevation Column
+                        col_n=cn, col_e=ce,
+                        step=tol_step_val, 
+                        cover_cm=cov_used,
+                        criterio=criterio_eval
+                    )
+                    
+                    # --- CAPTURE NEW FINDINGS (FEATURE V6) ---
+                    if not zonas.empty:
+                        rep_date = df_t['Fecha'].iloc[0] if 'Fecha' in df_t.columns and not df_t.empty else datetime.now().date()
+                        for _, z_row in zonas.iterrows():
+                            # Extract safe values
+                            n_val = z_row.get('Norte') if pd.notnull(z_row.get('Norte')) else 0
+                            e_val = z_row.get('Este') if pd.notnull(z_row.get('Este')) else 0
+                            elev_val = z_row.get('Elev_Min') if pd.notnull(z_row.get('Elev_Min')) else 0
+                            desv_val = z_row.get('Desv_Min (cm)') if pd.notnull(z_row.get('Desv_Min (cm)')) else 0
+                            
+                            new_rec = {
+                                'Poza': pid,
+                                'Turno': t,
+                                'Fecha_Reporte': str(rep_date),
+                                'Norte': n_val,
+                                'Este': e_val,
+                                'Cota_Teorica': ras_used,
+                                'Cota_GPS': elev_val,
+                                'Desv_GPS': desv_val
+                            }
+                            new_findings_buffer.append(new_rec)
+
+                    # STANDARDIZE COLUMNS FOR DOWNSTREAM
+                    if cn in df_proc.columns: df_proc['Norte'] = df_proc[cn]
+                    if ce in df_proc.columns: df_proc['Este'] = df_proc[ce]
+                    if cz in df_proc.columns: df_proc['Elev'] = df_proc[cz]
+                    
+                    # Prepare Context (Classic Text)
+                    txt_context_classic = topo_logic.generar_texto_analisis(res_tbl, zonas, atot, f"{pid}_{t}")
+                    
+                    # --- AI ANALYSIS ---
+                    if ai_enabled and active_key:
+                        cache_key = f"ai_res_{pid}_{t}"
+                        cached_text = st.session_state.get(cache_key)
+                        
+                        if cached_text:
+                                if "|||" in cached_text:
+                                    parts = cached_text.split("|||")
+                                    txt_analysis = parts[0].strip()
+                                    txt_analysis_crit = parts[1].strip()
+                                else:
+                                    txt_analysis = cached_text
+                                    txt_analysis_crit = "Análisis Crítico no disponible en caché (Regenerar)."
+                        else:
+                            # 1. General Analysis
+                            txt_ai_gen, _ = generar_comentario_ia(
+                                txt_context_classic, 
+                                active_key, 
+                                model_name=model_to_use, 
+                                custom_instruction=custom_prompt
+                            )
+                            
+                            # 2. Critical Analysis
+                            txt_ai_crit = "No hay zonas críticas para analizar."
+                            if not zonas.empty:
+                                    context_crit = f"Tabla de Zonas Críticas (Puntos Bajos):\n{zonas.to_string()}\nTotal Puntos Bajos: {len(zonas)}\nÁrea Total Defectos: {atot:.1f} m2"
+                                    prompt_crit = "Analiza BREVEMENTE estas zonas críticas (puntos bajos). Menciona cuántas son, el área afectada y la gravedad. Foco en corrección."
+                                    txt_ai_crit, _ = generar_comentario_ia(
+                                    context_crit, 
+                                    active_key, 
+                                    model_name=model_to_use, 
+                                    custom_instruction=prompt_crit
+                                    )
+
+                            if "Error" not in txt_ai_gen:
+                                txt_analysis = txt_ai_gen
+                                txt_analysis_crit = txt_ai_crit
+                                combined_cache = f"{txt_analysis} ||| {txt_analysis_crit}"
+                                st.session_state[cache_key] = combined_cache
+                            else:
+                                txt_analysis = f"❌ Error GenAI: {txt_ai_gen}"
+                                txt_analysis_crit = "Error."
+                    else:
+                        txt_analysis = txt_context_classic
+                        txt_analysis_crit = "Análisis IA Desactivado."
+                    
+                    poza_res[t] = {
+                        'tbl': res_tbl, 'df': df_proc, 'zonas': zonas, 'atot': atot, 'vacio': False,
+                        'texto_analisis': txt_analysis,
+                        'texto_analisis_critico': txt_analysis_crit,
+                        # Metrics helper if needed
+                        'metrics': calculate_metrics_from_points(zonas.to_dict('records') if not zonas.empty else [], col_x=ce, col_y=cn)
+                    }
+                except Exception as e:
+                    st.error(f"Error procesando {pid} Turno {t}: {e}")
+                    traceback.print_exc()
+                    poza_res[t] = {'vacio': True}
+
+            global_results[pid] = poza_res
+
+    # --- HISTORY: MERGE & SAVE NEW FINDINGS ---
+    if new_findings_buffer:
+        df_new_findings = pd.DataFrame(new_findings_buffer)
+        hist_df_updated, count_new = db_manager.merge_new_findings(hist_df_current, df_new_findings)
+        if count_new > 0:
+            db_manager.save_history(hist_df_updated)
+            st.toast(f"✅ Se agregaron {count_new} nuevos puntos al historial.", icon="💾")
 
     # 4. REPORT GENERATION PHASE (ONCE)
     col_mapping = {'N': cn, 'E': ce, 'Z': cz}
@@ -903,22 +1271,20 @@ if apply_filters and df is not None:
             cov_used = poza_data['Config']['Cover']
             src_cov = poza_data['Config']['Source']
             
-            # Calculate what tolerance was likely used for display
-            # Calculate what tolerance was likely used for display
             if cov_used > 0:
                 if criterio_eval == "Criterio Excon":
-                     dyn_tol = 15.0 if cov_used > 50 else 10.0
-                     tol_label = f"{dyn_tol:.1f}cm (Excon)"
+                        dyn_tol = 15.0 if cov_used > 50 else 10.0
+                        tol_label = f"{dyn_tol:.1f}cm (Excon)"
                 else:
-                    dyn_tol = topo_logic.calculate_dynamic_tolerance(cov_used)
-                    tol_label = f"{dyn_tol:.1f}cm (Dinámica)"
+                    dyn_tol = 0.0 # Placeholder
+                    tol_label = f"Dinámica"
             else:
                 dyn_tol = 4.0 # Default fallback
-                tol_label = "PENDIENTE (Falta Espesor)"
+                tol_label = "PENDIENTE"
             
             # Display Config Info
             if cov_used <= 0:
-                 st.error("⚠️ **ALERTA: Falta Espesor (Cover).** No se encontró en la BD ni se ingresó valor manual.")
+                    st.error("⚠️ **ALERTA: Falta Espesor (Cover).** No se encontró en la BD ni se ingresó valor manual.")
             else:
                 cov_msg = f"{cov_used:.1f}cm ({src_cov})"
                 st.info(f"📐 **Rasante:** {ras_used:.3f}m | **Espesor (Cover):** {cov_msg} | **Tolerancia Detección:** {tol_label}")
@@ -932,16 +1298,18 @@ if apply_filters and df is not None:
                 
                 for idx, t in enumerate(turns_present):
                     data = poza_data[t]
+                    if data.get('vacio'): continue
+                    
                     with col_charts[idx]:
                         st.subheader(f"Turno {t}")
                         
-                        # ANALYSIS TEXT FIRST (Expanded)
-                        txt = topo_logic.generar_texto_analisis(data['tbl'], data['zonas'], data['atot'], f"{pid}_{t}")
-                        st.text_area("Análisis:", value=txt, height=150, disabled=True)
+                        # ANALYSIS TEXT
+                        txt = data.get('texto_analisis', "Error.")
+                        st.markdown("**Análisis Técnico:**")
+                        st.info(txt, icon="📝")
                         
-                        # TABLE (Restore 'Tipo', hide 'Color')
+                        # TABLE
                         df_show = data['tbl'].drop(columns=['Color'], errors='ignore')
-                        # Explicit integer formatting for coordinates and area
                         format_dict = {
                             'Porcentaje': "{:.1f}%",
                             'Area_Efectiva_m2': "{:.0f}",
@@ -950,17 +1318,16 @@ if apply_filters and df is not None:
                         }
                         st.dataframe(df_show.style.format(format_dict, na_rep=""), use_container_width=True)
                         
-                        # CHART (Vertical Bars with Colors)
+                        # CHART
                         fig = go.Figure()
-                        # Use colors from logic if available
                         colors_mapped = [row['Color'] for _, row in data['tbl'].iterrows()] if 'Color' in data['tbl'].columns else None
                         
                         fig.add_trace(go.Bar(
-                            x=data['tbl']['Rango'], # X Axis = Labels (Ranges)
-                            y=data['tbl']['Puntos'], # Y Axis = Count (Height)
+                            x=data['tbl']['Rango'], 
+                            y=data['tbl']['Puntos'], 
                             text=data['tbl']['Puntos'], 
                             textposition='auto',
-                            marker_color=colors_mapped # Specific colors per bar
+                            marker_color=colors_mapped 
                         ))
                         
                         fig.update_layout(
@@ -973,72 +1340,64 @@ if apply_filters and df is not None:
                         st.plotly_chart(fig, use_container_width=True)
 
             with t_map:
-                # 1. Combined Satellite Map (Full Width) - HIDDEN TEMPORARILY
-                # ... (Hidden code) ...
-
-                st.divider()
-
-                # 2. Individual Heatmaps
                 col_maps = st.columns(len(turns_present)) if len(turns_present) > 0 else [st.container()]
                 for idx, t in enumerate(turns_present):
-                     data = poza_data[t]
-                     with col_maps[idx]:
-                         st.subheader(f"Mapa - Turno {t}")
-                         # Removed per-turn satellite map from here
+                        data = poza_data[t]
+                        if data.get('vacio'): continue
 
-                         # 2. Heatmap (Plotly)
-                         st.caption(f"Mapa de Calor Interactivo (Tol: {dyn_tol:.1f}cm)")
-                         
-                         fig_map = topo_logic.generar_mapa_interactivo(
-                             data['df'], data['zonas'], 
-                             col_n=cn, col_e=ce,
-                             titulo=f"Mapa {pid} - Turno {t}",
-                             tol=dyn_tol,
-                             criterio=criterio_eval,
-                             cover_cm=cov_used
-                         )
-                         
-                         if isinstance(fig_map, str):
-                             st.error(fig_map)
-                         elif fig_map is None:
-                             st.warning("No se pudo generar el mapa.")
-                         else:
-                             st.plotly_chart(fig_map, use_container_width=True)
+                        with col_maps[idx]:
+                            st.subheader(f"Mapa - Turno {t}")
+                            st.caption(f"Mapa de Calor Interactivo (Tol: {dyn_tol:.1f}cm)")
+                            
+                            fig_map = topo_logic.generar_mapa_interactivo(
+                                data['df'], data['zonas'], 
+                                col_n=cn, col_e=ce,
+                                titulo=f"Mapa {pid} - Turno {t}",
+                                tol=dyn_tol,
+                                criterio=criterio_eval,
+                                cover_cm=cov_used
+                            )
+                            
+                            if isinstance(fig_map, str):
+                                st.error(fig_map)
+                            elif fig_map is None:
+                                st.warning("No se pudo generar el mapa.")
+                            else:
+                                st.plotly_chart(fig_map, use_container_width=True)
 
-                         # TABLE & KPI BELOW MAP
-                         if not data['zonas'].empty:
-                             with st.expander(f"Detalle Puntos Bajos - {t}", expanded=True):
-                                 # Format KPI column as percentage
-                                 # Formato solicitado: Norte/Este sin decimales, Elev_Min con 3.
-                                 fmt_zonas = {
-                                     'KPI Incidencia': "{:.4f}", 
-                                     'Area_Efectiva_m2': "{:.0f}",
-                                     'Norte': "{:.0f}", 'Este': "{:.0f}",
-                                     'Elev_Min': "{:.3f}",
-                                     'Desv_Min (cm)': "{:.1f}"
-                                 }
-                                 st.dataframe(
-                                     data['zonas'].style.format(fmt_zonas, na_rep=""), 
-                                     use_container_width=True
-                                 )
-                         else:
-                             st.success("No hay zonas defectuosas.")
+                            # TABLE & KPI BELOW MAP
+                            if not data['zonas'].empty:
+                                with st.expander(f"Detalle Puntos Bajos - {t}", expanded=True):
+                                    st.markdown("**Análisis de Defectos (IA):**")
+                                    crit_txt = data.get('texto_analisis_critico', "Sin comentarios.")
+                                    st.info(crit_txt, icon="⚠️")
+
+                                    fmt_zonas = {
+                                        'KPI Incidencia': "{:.4f}", 
+                                        'Area_Efectiva_m2': "{:.0f}",
+                                        'Norte': "{:.0f}", 'Este': "{:.0f}",
+                                        'Elev_Min': "{:.3f}",
+                                        'Desv_Min (cm)': "{:.1f}"
+                                    }
+                                    st.dataframe(
+                                        data['zonas'].style.format(fmt_zonas, na_rep=""), 
+                                        use_container_width=True
+                                    )
+                            else:
+                                st.success("No hay zonas defectuosas.")
 
             with t_down:
-                 st.success("Reporte listo para descargar.")
-                 st.download_button(
+                    st.success("Reporte listo para descargar.")
+                    st.download_button(
                     label="Descargar Reporte Consolidado (Excel)",
                     data=excel_data,
                     file_name=f"Reporte_Topo_Consolidado_{datetime.now().strftime('%Y%m%d_%H%M')}.xlsx",
                     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                     type="primary",
                     key=f"btn_down_{pid}"
-                 )
+                    )
 
 # Branding Bottom Sidebar
 with st.sidebar:
     st.markdown("---")
     st.markdown("<div style='text-align: right; font-style: italic;'>Desarrollado por Departamento de Innovación Excon.</div>", unsafe_allow_html=True)
-
-
-

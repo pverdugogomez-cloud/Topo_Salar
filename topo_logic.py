@@ -15,6 +15,45 @@ import traceback
 AREA_MINIMA_M2 = 9.0
 GRID_SIZE = 1.0
 
+import json
+
+# ==========================================
+# CONSTANTES Y CONFIGURACIÓN
+# ==========================================
+CONFIG_FILE = "config_ai.json"
+
+DEFAULT_SETTINGS = {
+    "ai_enabled": True,
+    "system_prompt": """Actúa como un Ingeniero Geomensor experto en control de calidad para minería.
+Analiza exhaustivamente los datos proporcionados para generar un informe técnico completo.
+Estructura tu respuesta en: 
+1. Resumen Ejecutivo (Estado general de la poza).
+2. Análisis de Zonas Críticas (Identificación de áreas con defectos, sin inventar coordenadas).
+3. Recomendaciones Operativas (Acciones correctivas específicas).
+IMPORTANTE: NO intentes listar coordenadas específicas si no se te proveen explícitamente (usa referencias a "Tablas adjuntas"). Mantén un tono profesional y directo.""",
+    "admin_password": "excon" 
+}
+
+def load_settings():
+    """Carga configuración de IA desde JSON o devuelve defaults."""
+    if os.path.exists(CONFIG_FILE):
+        try:
+            with open(CONFIG_FILE, "r", encoding="utf-8") as f:
+                return {**DEFAULT_SETTINGS, **json.load(f)}
+        except:
+            return DEFAULT_SETTINGS
+    return DEFAULT_SETTINGS
+
+def save_settings(settings):
+    """Guarda la configuración actual en JSON."""
+    try:
+        with open(CONFIG_FILE, "w", encoding="utf-8") as f:
+            json.dump(settings, f, ensure_ascii=False, indent=4)
+        return True
+    except Exception as e:
+        print(f"Error saving settings: {e}")
+        return False
+
 # Colores Base (Originales 8 bandas para Estadísticas)
 COLORES_FINALES_BASE = [
     '#C00000', # < -3x
