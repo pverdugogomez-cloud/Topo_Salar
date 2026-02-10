@@ -10,6 +10,9 @@ import importlib
 importlib.reload(topo_logic)
 import traceback
 import plotly.graph_objects as go
+import gspread
+from oauth2client.service_account import ServiceAccountCredentials
+
 
 # ==========================================
 # CONFIGURACIÓN PAGINA
@@ -19,9 +22,62 @@ st.set_page_config(page_title="Topo Dashboard V27", layout="wide", page_icon="Lo
 # ==========================================
 # GESTIÓN DE BASES DE DATOS (JSON)
 # ==========================================
+# ==========================================
+# GESTIÓN DE BASES DE DATOS (HÍBRIDO: GOOGLE SHEETS / JSON)
+# ==========================================
 DB_FILE = "base_datos_pozas.json"
+GSHEET_NAME = "BaseDatos_Pozas" # Nombre por defecto, configurable en secrets
+
+def get_gsheets_connection():
+    """Intenta conectar con Google Sheets usando Secrets de Streamlit."""
+    try:
+        if "gcp_service_account" not in st.secrets:
+            return None
+        
+        # Scope para Drive y Sheets
+        scope = ['https://spreadsheets.google.com/feeds', 'https://www.googleapis.com/auth/drive']
+        
+        # Crear credenciales desde el diccionario de secrets
+        creds_dict = dict(st.secrets["gcp_service_account"])
+        creds = ServiceAccountCredentials.from_json_keyfile_dict(creds_dict, scope)
+        
+        client = gspread.authorize(creds)
+        return client
+    except Exception as e:
+        print(f"Error conectando a GSheets: {e}")
+        return None
 
 def load_db():
+    start_db = {}
+    
+    # 1. INTENTO GOOGLE SHEETS
+    client = get_gsheets_connection()
+    if client:
+        try:
+            # Buscar hoja
+            sheet_name = st.secrets.get("GSHEET_NAME", GSHEET_NAME)
+            sh = client.open(sheet_name)
+            worksheet = sh.sheet1
+            
+            # Leer todos los registros
+            records = worksheet.get_all_records()
+            
+            # Convertir a formato Dict {PozaID: Cover}
+            for r in records:
+                # Asumiendo columnas "Poza" y "Cover"
+                pid = str(r.get('Poza', '')).strip().upper()
+                cov = r.get('Cover', 0)
+                if pid:
+                    start_db[pid] = float(cov) if cov != '' else 0.0
+            
+            st.session_state['db_source'] = "☁️ Nube (Google Sheets)"
+            return start_db
+            
+        except Exception as e:
+            st.warning(f"No se pudo leer Google Sheet '{GSHEET_NAME}': {e}. Usando local.")
+    
+    # 2. FALLBACK: JSON LOCAL
+    st.session_state['db_source'] = "💻 Local (JSON)"
     if os.path.exists(DB_FILE):
         try:
             with open(DB_FILE, "r") as f: return json.load(f)
@@ -29,10 +85,38 @@ def load_db():
     return {}
 
 def save_db(data):
-    with open(DB_FILE, "w") as f: json.dump(data, f)
+    # 1. SIEMPRE GUARDAR LOCAL (BACKUP)
+    try:
+        with open(DB_FILE, "w") as f: json.dump(data, f)
+    except Exception as e:
+        st.error(f"Error guardando local: {e}")
 
-if 'db_pozas' not in st.session_state:
-    st.session_state.db_pozas = load_db()
+    # 2. INTENTO GOOGLE SHEETS
+    client = get_gsheets_connection()
+    if client:
+        try:
+            sheet_name = st.secrets.get("GSHEET_NAME", GSHEET_NAME)
+            try:
+                sh = client.open(sheet_name)
+            except gspread.SpreadsheetNotFound:
+                # Crear si no existe (requiere permisos de creación, suele ser dificil con service account)
+                # Mejor avisar al usuario que la cree.
+                st.error(f"No se encuentra la hoja '{sheet_name}'. Por favor créela y compártala con el email del bot.")
+                return
+
+            worksheet = sh.sheet1
+            worksheet.clear() # Borrar todo y reescribir (simple strategy)
+            
+            # Preparar datos
+            rows = [["Poza", "Cover"]] # Headers
+            for k, v in data.items():
+                rows.append([k, v])
+            
+            worksheet.update('A1', rows)
+            st.toast("Guardado en Google Sheets exitosamente!", icon="☁️")
+            
+        except Exception as e:
+            st.error(f"Error guardando en Nube: {e}")
 
 # ==========================================
 # FUNCIONES AUXILIARES UI
@@ -271,6 +355,14 @@ with st.sidebar:
     
     st.divider()
     
+    # DB Status Indicator
+    db_src = st.session_state.get('db_source', 'Desconocido')
+    if "Nube" in db_src:
+        st.success(f"Base de Datos: {db_src}")
+    else:
+        st.warning(f"Base de Datos: {db_src}")
+
+    
     # B. DATOS DE ENTRADA (Top Priority)
     st.subheader("Datos de Entrada")
     uploaded_files = st.file_uploader("Cargar Archivos (CSV/Excel)", type=["csv", "xlsx"], accept_multiple_files=True, key="main_file_uploader")
@@ -492,6 +584,7 @@ with st.sidebar:
         # Helper to compare sets safely dealing with potentially unhashable types if any (though strings are safe)
         cached_pozas = st.session_state.get('last_pozas_set', set())
         
+        cover_rows = []
         if 'df_covers_state' not in st.session_state or cached_pozas != current_pozas_set:
             # Rebuild state from DB and persistence
             cover_rows = []
