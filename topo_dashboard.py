@@ -126,6 +126,13 @@ def save_db(data):
 # ==========================================
 # FUNCIONES AUXILIARES UI
 # ==========================================
+if 'db_pozas' not in st.session_state:
+    st.session_state.db_pozas = load_db()
+
+# SAFEGUARD: Ensure it's a dict (in case of empty list JSON)
+if not isinstance(st.session_state.db_pozas, dict):
+    st.session_state.db_pozas = {}
+
 def get_automatic_tolerance(cover):
     if cover >= 44: return cover * 0.50
     elif cover >= 40: return cover * 0.30
