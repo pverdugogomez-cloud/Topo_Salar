@@ -80,7 +80,12 @@ def load_db():
     st.session_state['db_source'] = "💻 Local (JSON)"
     if os.path.exists(DB_FILE):
         try:
-            with open(DB_FILE, "r") as f: return json.load(f)
+            with open(DB_FILE, "r") as f: 
+                data = json.load(f)
+                if isinstance(data, dict):
+                    return data
+                else:
+                    return {}
         except: return {}
     return {}
 
