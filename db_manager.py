@@ -5,8 +5,10 @@ import hashlib
 import io
 from datetime import datetime
 
-# Path to local DB file
-DB_FILE = "db_historial_calidad.json"
+import db_config
+
+# Path to local/cloud DB file (Smart Detection)
+DB_FILE = db_config.get_db_path("db_historial_calidad.json")
 
 def get_db_path():
     return os.path.abspath(DB_FILE)

@@ -19,12 +19,18 @@ import google.generativeai as genai
 from google.api_core import exceptions as google_exceptions
 import time
 import math
+import db_config # Smart path configuration
 
 
 # ==========================================
 # CONFIGURACIÓN PAGINA
 # ==========================================
-st.set_page_config(page_title="Topo Dashboard V27", layout="wide", page_icon="Logo_TS.ico")
+# --- CONFIGURACIÓN BASICA ---
+st.set_page_config(layout="wide", page_title="Topo Dashboard V5.0", page_icon="Logo_TS.ico")
+
+# --- PATH CONFIGURATION (CLOUD/DRIVE FRIENDLY) ---
+DB_FILE = db_config.get_db_path("base_datos_pozas.json")
+AI_CONFIG_FILE = db_config.get_db_path("config_ai.json")
 
 # ==========================================
 # GESTIÓN DE BASES DE DATOS (JSON)
@@ -711,7 +717,7 @@ with st.sidebar:
                 num_rows="dynamic",
                 column_config={
                     "Poza": st.column_config.TextColumn("Poza ID", required=True),
-                    "Cover": st.column_config.NumberColumn("Cover (cm)", required=True, min_value=0.0)
+                    "Cover": st.column_config.NumberColumn("Cover (cm)", required=True, min_value=0.0, format="%.2f", step=0.01)
                 },
                 use_container_width=True,
                 key="db_editor_widget"
@@ -810,8 +816,8 @@ with st.sidebar:
                 st.session_state.df_covers_state,
                 column_config={
                     "PozaID": st.column_config.TextColumn("Poza", disabled=True),
-                    "Cover BD": st.column_config.NumberColumn("BD (cm)", disabled=True, format="%.1f"),
-                    "Cover Manual": st.column_config.NumberColumn("Manual (cm)", required=True, min_value=0.0, format="%.1f")
+                    "Cover BD": st.column_config.NumberColumn("BD (cm)", disabled=True, format="%.2f"),
+                    "Cover Manual": st.column_config.NumberColumn("Manual (cm)", required=True, min_value=0.0, format="%.2f", step=0.01)
                 },
                 disabled=["PozaID", "Cover BD"],
                 hide_index=True,
@@ -857,13 +863,10 @@ with st.sidebar:
                 
                 ras_auto = 0.0
                 if cov_eff > 0:
-                    # SMART UNIT DETECTION:
-                    # If Cover < 1.5, assume Meters -> Add directly.
-                    # If Cover >= 1.5, assume CM -> Divide by 100 before adding.
-                    if cov_eff < 1.5:
-                         ras_auto = 2300.0 + cov_eff
-                    else:
-                         ras_auto = 2300.0 + (cov_eff/100.0)
+                    # STRICT CM INPUT AS REQUESTED:
+                    # User confirmed all inputs in DB/Manual are in Centimeters (e.g. 25.5 or 0.5).
+                    # Always divide by 100 to convert to Meters for Rasante.
+                    ras_auto = 2300.0 + (cov_eff/100.0)
                 else:
                     # Fallback logic if needed, but primary is now cover
                     # Try to parse from file data if available? 
